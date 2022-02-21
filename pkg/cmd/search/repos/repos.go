@@ -120,7 +120,7 @@ func reposRun(opts *ReposOptions) error {
 		return opts.Browser.Browse(url)
 	}
 	opts.IO.StartProgressIndicator()
-	result, err := searcher.Search(opts.Query)
+	result, err := searcher.Repositories(opts.Query)
 	opts.IO.StopProgressIndicator()
 	if err != nil {
 		return err
@@ -158,40 +158,35 @@ func reposRun(opts *ReposOptions) error {
 	return nil
 }
 
-func displayResults(io *iostreams.IOStreams, results search.Result) error {
+func displayResults(io *iostreams.IOStreams, results search.RepositoriesResult) error {
 	cs := io.ColorScheme()
 	tp := utils.NewTablePrinter(io)
 	for _, repo := range results.Items {
 		var tags []string
-		private, _ := repo["private"].(bool)
-		fork, _ := repo["fork"].(bool)
-		archived, _ := repo["archived"].(bool)
-		if private {
+		if repo.Private {
 			tags = append(tags, "private")
 		} else {
 			tags = append(tags, "public")
 		}
-		if fork {
+		if repo.Fork {
 			tags = append(tags, "fork")
 		}
-		if archived {
+		if repo.Archived {
 			tags = append(tags, "archived")
 		}
 		info := strings.Join(tags, ", ")
 		infoColor := cs.Gray
-		if private {
+		if repo.Private {
 			infoColor = cs.Yellow
 		}
-		updatedAt, _ := repo["updated_at"].(string)
-		tp.AddField(repo["full_name"].(string), nil, cs.Bold)
-		description, _ := repo["description"].(string)
+		tp.AddField(repo.FullName, nil, cs.Bold)
+		description := repo.Description
 		tp.AddField(text.ReplaceExcessiveWhitespace(description), nil, nil)
 		tp.AddField(info, nil, infoColor)
 		if tp.IsTTY() {
-			t, _ := time.Parse(time.RFC3339, updatedAt)
-			tp.AddField(t.Format(time.RFC822), nil, cs.Gray)
+			tp.AddField(utils.FuzzyAgoAbbr(time.Now(), repo.UpdatedAt), nil, cs.Gray)
 		} else {
-			tp.AddField(updatedAt, nil, nil)
+			tp.AddField(repo.UpdatedAt.Format(time.RFC3339), nil, nil)
 		}
 		tp.EndRow()
 	}
@@ -199,7 +194,7 @@ func displayResults(io *iostreams.IOStreams, results search.Result) error {
 	if io.IsStdoutTTY() {
 		header := "No repositories matched your search\n"
 		if len(results.Items) > 0 {
-			header = fmt.Sprintf("Showing %d of %d repositories\n\n", len(results.Items), results.TotalCount)
+			header = fmt.Sprintf("Showing %d of %d repositories\n\n", len(results.Items), results.Total)
 		}
 		fmt.Fprintf(io.Out, "\n%s", header)
 	}

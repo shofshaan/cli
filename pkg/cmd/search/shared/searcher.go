@@ -11,100 +11,128 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/pkg/search"
 )
+
+var linkRE = regexp.MustCompile(`<([^>]+)>;\s*rel="([^"]+)"`)
+var pageRE = regexp.MustCompile(`(\?|&)page=(\d*)`)
+var jsonTypeRE = regexp.MustCompile(`[/+]json($|;)`)
 
 type searcher struct {
 	client *http.Client
 	host   string
 }
 
-func NewSearcher(client *http.Client, host string) *searcher {
+func NewSearcher(client *http.Client, host string) search.Searcher {
 	return &searcher{
 		client: client,
 		host:   host,
 	}
 }
 
-func (s *searcher) Search(query search.Query) (search.Result, error) {
-	result := search.Result{}
-	path := fmt.Sprintf("https://api.%s/search/%s", s.host, query.Kind)
-	queryString := url.Values{}
+func (s *searcher) Repositories(query search.Query) (search.RepositoriesResult, error) {
+	result := search.RepositoriesResult{}
+	toRetrieve := query.Limit
+	var resp *http.Response
+	var err error
+	for toRetrieve > 0 {
+		query.Limit = int(math.Min(float64(toRetrieve), float64(100)))
+		query.Page = nextPage(resp)
+		if query.Page == 0 {
+			break
+		}
+		page := search.RepositoriesResult{}
+		resp, err = s.search(query, &page)
+		if err != nil {
+			return result, err
+		}
+		result.IncompleteResults = page.IncompleteResults
+		result.Total = page.Total
+		result.Items = append(result.Items, page.Items...)
+		toRetrieve = toRetrieve - len(page.Items)
+	}
+	return result, nil
+}
+
+func nextPage(resp *http.Response) (page int) {
+	page = 0
+	if resp == nil {
+		page = 1
+	} else {
+		for _, m := range linkRE.FindAllStringSubmatch(resp.Header.Get("Link"), -1) {
+			if len(m) > 2 && m[2] == "next" {
+				p := pageRE.FindStringSubmatch(m[1])
+				if len(p) == 3 {
+					i, err := strconv.Atoi(p[2])
+					if err == nil {
+						page = i
+					}
+				}
+			}
+		}
+	}
+	return
+}
+
+func (s *searcher) search(query search.Query, result interface{}) (*http.Response, error) {
+	path := fmt.Sprintf("%ssearch/%s", ghinstance.RESTPrefix(s.host), query.Kind)
+	qs := url.Values{}
+	qs.Set("page", strconv.Itoa(query.Page))
+	qs.Set("per_page", strconv.Itoa(query.Limit))
+	qs.Set("q", s.QueryString(query))
+	if query.Order.IsSet() {
+		qs.Set(query.Order.Key(), query.Order.String())
+	}
+	if query.Sort.IsSet() {
+		qs.Set(query.Sort.Key(), query.Sort.String())
+	}
+	url := fmt.Sprintf("%s?%s", path, qs.Encode())
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	success := resp.StatusCode >= 200 && resp.StatusCode < 300
+	if !success {
+		return resp, handleHTTPError(resp)
+	}
+	decoder := json.NewDecoder(resp.Body)
+	err = decoder.Decode(result)
+	if err != nil {
+		return resp, err
+	}
+	return resp, nil
+}
+
+func (s *searcher) QueryString(query search.Query) string {
 	q := strings.Builder{}
 	quotedKeywords := quoteKeywords(query.Keywords)
 	q.WriteString(strings.Join(quotedKeywords, " "))
-	for k, v := range query.Qualifiers.ListSet() {
+	for k, v := range listSet(query.Qualifiers) {
 		v = quoteQualifier(v)
 		q.WriteString(fmt.Sprintf(" %s:%s", k, v))
 	}
-	queryString.Set("q", q.String())
-	if query.Order.IsSet() {
-		queryString.Set(query.Order.Key(), query.Order.String())
-	}
-	if query.Sort.IsSet() {
-		queryString.Set(query.Sort.Key(), query.Sort.String())
-	}
-	pages := math.Ceil((float64(query.Limit) / float64(100)))
-	for i := 1; i <= int(pages); i++ {
-		queryString.Set("page", strconv.Itoa(i))
-		remaining := query.Limit - (i * 100)
-		if remaining > 100 {
-			queryString.Set("per_page", "100")
-		} else if remaining <= 0 {
-			queryString.Set("per_page", strconv.Itoa(query.Limit))
-		} else {
-			queryString.Set("per_page", strconv.Itoa(remaining))
-		}
-		url := fmt.Sprintf("%s?%s", path, queryString.Encode())
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return result, err
-		}
-		req.Header.Set("Content-Type", "application/json; charset=utf-8")
-		req.Header.Set("Accept", "application/vnd.github.v3+json")
-		resp, err := s.client.Do(req)
-		if err != nil {
-			return result, err
-		}
-		defer resp.Body.Close()
-		success := resp.StatusCode >= 200 && resp.StatusCode < 300
-		if !success {
-			return result, handleHTTPError(resp)
-		}
-		b, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return result, err
-		}
-		pageResult := search.Result{}
-		err = json.Unmarshal(b, &pageResult)
-		if err != nil {
-			return result, err
-		}
-		result.IncompleteResults = pageResult.IncompleteResults
-		result.TotalCount = pageResult.TotalCount
-		result.Items = append(result.Items, pageResult.Items...)
-	}
-	return result, nil
+	return q.String()
 }
 
 func (s *searcher) URL(query search.Query) string {
 	path := fmt.Sprintf("https://%s/search", s.host)
 	queryString := url.Values{}
 	queryString.Set("type", query.Kind)
+	queryString.Set("q", s.QueryString(query))
 	if query.Order.IsSet() {
 		queryString.Set(query.Order.Key(), query.Order.String())
 	}
 	if query.Sort.IsSet() {
 		queryString.Set(query.Sort.Key(), query.Sort.String())
 	}
-	q := strings.Builder{}
-	quotedKeywords := quoteKeywords(query.Keywords)
-	q.WriteString(strings.Join(quotedKeywords, " "))
-	for k, v := range query.Qualifiers.ListSet() {
-		v = quoteQualifier(v)
-		q.WriteString(fmt.Sprintf(" %s:%s", k, v))
-	}
-	queryString.Add("q", q.String())
 	url := fmt.Sprintf("%s?%s", path, queryString.Encode())
 	return url
 }
@@ -134,7 +162,15 @@ func quoteQualifier(q string) string {
 	return q
 }
 
-var jsonTypeRE = regexp.MustCompile(`[/+]json($|;)`)
+func listSet(q search.Qualifiers) map[string]string {
+	m := map[string]string{}
+	for _, v := range q {
+		if v.IsSet() {
+			m[v.Key()] = v.String()
+		}
+	}
+	return m
+}
 
 type httpError struct {
 	Errors     []httpErrorItem
