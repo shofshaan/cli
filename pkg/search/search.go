@@ -2,16 +2,37 @@ package search
 
 import "time"
 
-type Qualifiers map[string]Qualifier
+type Qualifiers struct {
+	Archived         *bool
+	Created          string
+	Followers        string
+	Fork             string
+	Forks            string
+	GoodFirstIssues  string
+	HelpWantedIssues string
+	In               []string
+	Is               string
+	Language         []string
+	License          []string
+	Mirror           *bool
+	Org              string
+	Pushed           string
+	Repo             string
+	Size             string
+	Stars            string
+	Topic            []string
+	Topics           string
+	User             string
+}
 
 type Query struct {
 	Keywords   []string
 	Kind       string
 	Limit      int
-	Order      Parameter
+	Order      string
 	Page       int
 	Qualifiers Qualifiers
-	Sort       Parameter
+	Sort       string
 }
 
 type RepositoriesResult struct {
@@ -126,17 +147,6 @@ type User struct {
 
 type Searcher interface {
 	Repositories(Query) (RepositoriesResult, error)
+	String(Query) string
 	URL(Query) string
 }
-
-// This is a superset of the pflag.Value interface.
-// Set, String, and Type methods are needed to satisfy it.
-type Qualifier interface {
-	IsSet() bool
-	Key() string
-	Set(string) error
-	String() string
-	Type() string
-}
-
-type Parameter = Qualifier

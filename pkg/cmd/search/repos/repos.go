@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,14 @@ import (
 	"github.com/cli/cli/v2/utils"
 	"github.com/spf13/cobra"
 )
+
+// These regexs are not perfect and mostly used to give some input validation.
+// They are more permissive than the server so we can provide early feedback
+// to the user in most cases but there are some inputs that will pass the
+// regexs and then be rejected by the server.
+var rangeRE = regexp.MustCompile(`^(>|>=|<|<=|\*\.\.)?\d+(\.\.(\*|\d+))?$`)
+var dateTime = `(\d|-|\+|:|T)+`
+var dateTimeRangeRE = regexp.MustCompile(fmt.Sprintf(`^(>|>=|<|<=|\*\.\.)?%s(\.\.(\*|%s))?$`, dateTime, dateTime))
 
 type ReposOptions struct {
 	Browser      cmdutil.Browser
@@ -37,7 +46,7 @@ func NewCmdRepos(f *cmdutil.Factory, runF func(*ReposOptions) error) *cobra.Comm
 		Config:     f.Config,
 		HttpClient: f.HttpClient,
 		IO:         f.IOStreams,
-		Query:      NewSearchQuery(),
+		Query:      search.Query{Kind: "repositories"},
 	}
 
 	cmd := &cobra.Command{
@@ -69,30 +78,33 @@ func NewCmdRepos(f *cmdutil.Factory, runF func(*ReposOptions) error) *cobra.Comm
 
 	// Query parameter flags
 	cmd.Flags().IntVarP(&opts.Query.Limit, "limit", "L", 30, "Maximum number of repositories to fetch")
-	cmd.Flags().Var(opts.Query.Order, "order", "Order of repositories returned, ignored unless '--sort' is specified")
-	cmd.Flags().Var(opts.Query.Sort, "sort", "Sorts the repositories by stars, forks, help-wanted-issues, or updated")
+	cmdutil.StringEnumFlag(cmd, &opts.Query.Order, "order", "", "", []string{"asc", "desc"}, "Order of repositories returned, ignored unless '--sort' is specified")
+	cmdutil.StringEnumFlag(cmd, &opts.Query.Sort, "sort", "", "", []string{"forks", "help-wanted-issues", "stars", "updated"}, "Sorts the repositories by stars, forks, help-wanted-issues, or updated")
 
 	// Query qualifier flags
-	cmd.Flags().Var(opts.Query.Qualifiers["Archived"], "archived", "Filter based on archive state")
-	cmd.Flags().Var(opts.Query.Qualifiers["Created"], "created", "Filter based on created at date")
-	cmd.Flags().Var(opts.Query.Qualifiers["Followers"], "followers", "Filter based on number of followers")
-	cmd.Flags().Var(opts.Query.Qualifiers["Fork"], "include-forks", "Include forks in search")
-	cmd.Flags().Var(opts.Query.Qualifiers["Forks"], "forks", "Filter on number of forks")
-	cmd.Flags().Var(opts.Query.Qualifiers["GoodFirstIssues"], "good-first-issues", "Filter on number of issues with the 'good first issue' label")
-	cmd.Flags().Var(opts.Query.Qualifiers["HelpWantedIssues"], "help-wanted-issues", "Filter on number of issues with the 'help wanted' label")
-	cmd.Flags().Var(opts.Query.Qualifiers["In"], "in", "Restrict search to the name, description, or README file")
-	cmd.Flags().Var(opts.Query.Qualifiers["Language"], "language", "Filter based on the coding language")
-	cmd.Flags().Var(opts.Query.Qualifiers["License"], "license", "Filter based on license type")
-	cmd.Flags().Var(opts.Query.Qualifiers["Mirror"], "mirror", "Filter based on mirror state")
-	cmd.Flags().Var(opts.Query.Qualifiers["Org"], "org", "Filter on organization")
-	cmd.Flags().Var(opts.Query.Qualifiers["Pushed"], "updated", "Filter on last updated at date")
-	cmd.Flags().Var(opts.Query.Qualifiers["Repo"], "repo", "Filter on repository name")
-	cmd.Flags().Var(opts.Query.Qualifiers["Size"], "size", "Filter on a size range, in kilobytes")
-	cmd.Flags().Var(opts.Query.Qualifiers["Stars"], "stars", "Filter on number of stars")
-	cmd.Flags().Var(opts.Query.Qualifiers["Topic"], "topic", "Filter on topic")
-	cmd.Flags().Var(opts.Query.Qualifiers["Topics"], "number-topics", "Filter on number of topics")
-	cmd.Flags().Var(opts.Query.Qualifiers["User"], "user", "Filter based on user")
-	cmd.Flags().Var(opts.Query.Qualifiers["Visibility"], "visibility", "Filter based on visibility")
+	cmdutil.NilBoolFlag(cmd, &opts.Query.Qualifiers.Archived, "archived", "", "Filter based on archive state")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.Created, "created", "", "", dateTimeRangeRE, "Filter based on created at date")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.Followers, "followers", "", "", rangeRE, "Filter based on number of followers")
+	cmdutil.StringEnumFlag(cmd, &opts.Query.Qualifiers.Fork, "include-forks", "", "", []string{"false", "true", "only"}, "Include forks in search")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.Forks, "forks", "", "", rangeRE, "Filter on number of forks")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.GoodFirstIssues,
+		"good-first-issues", "", "", rangeRE, "Filter on number of issues with the 'good first issue' label")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.HelpWantedIssues,
+		"help-wanted-issues", "", "", rangeRE, "Filter on number of issues with the 'help wanted' label")
+	cmdutil.StringSliceEnumFlag(cmd, &opts.Query.Qualifiers.In,
+		"in", "", nil, []string{"name", "description", "readme"}, "Restrict search to the name, description, or README file")
+	cmd.Flags().StringSliceVar(&opts.Query.Qualifiers.Language, "language", nil, "Filter based on the coding language")
+	cmd.Flags().StringSliceVar(&opts.Query.Qualifiers.License, "license", nil, "Filter based on license type")
+	cmdutil.NilBoolFlag(cmd, &opts.Query.Qualifiers.Mirror, "mirror", "", "Filter based on mirror state")
+	cmd.Flags().StringVar(&opts.Query.Qualifiers.Org, "org", "", "Filter on organization")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.Pushed, "updated", "", "", dateTimeRangeRE, "Filter on last updated at date")
+	cmd.Flags().StringVar(&opts.Query.Qualifiers.Repo, "repo", "", "Filter on repository name")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.Size, "size", "", "", rangeRE, "Filter on a size range, in kilobytes")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.Stars, "stars", "", "", rangeRE, "Filter on number of stars")
+	cmd.Flags().StringSliceVar(&opts.Query.Qualifiers.Topic, "topic", nil, "Filter on topic")
+	cmdutil.StringRegexpFlag(cmd, &opts.Query.Qualifiers.Topics, "number-topics", "", "", rangeRE, "Filter on number of topics")
+	cmd.Flags().StringVar(&opts.Query.Qualifiers.User, "user", "", "Filter based on user")
+	cmdutil.StringEnumFlag(cmd, &opts.Query.Qualifiers.Is, "visibility", "", "", []string{"public", "private"}, "Filter based on visibility")
 
 	return cmd
 }
@@ -190,7 +202,6 @@ func displayResults(io *iostreams.IOStreams, results search.RepositoriesResult) 
 		}
 		tp.EndRow()
 	}
-
 	if io.IsStdoutTTY() {
 		header := "No repositories matched your search\n"
 		if len(results.Items) > 0 {
@@ -198,36 +209,5 @@ func displayResults(io *iostreams.IOStreams, results search.RepositoriesResult) 
 		}
 		fmt.Fprintf(io.Out, "\n%s", header)
 	}
-
 	return tp.Render()
-}
-
-func NewSearchQuery() search.Query {
-	return search.Query{
-		Kind:  "repositories",
-		Order: shared.NewParameter("order", "string", "desc", shared.OptsValidator([]string{"asc", "desc"})),
-		Sort:  shared.NewParameter("sort", "string", "best match", shared.OptsValidator([]string{"forks", "help-wanted-issues", "stars", "updated"})),
-		Qualifiers: search.Qualifiers{
-			"Archived":         shared.NewQualifier("archived", "bool", "", shared.BoolValidator()),
-			"Created":          shared.NewQualifier("created", "string", "", shared.DateValidator()),
-			"Followers":        shared.NewQualifier("followers", "string", "", shared.RangeValidator()),
-			"Fork":             shared.NewQualifier("fork", "string", "false", shared.OptsValidator([]string{"false", "true", "only"})),
-			"Forks":            shared.NewQualifier("forks", "string", "", shared.RangeValidator()),
-			"GoodFirstIssues":  shared.NewQualifier("good-first-issues", "string", "", shared.RangeValidator()),
-			"HelpWantedIssues": shared.NewQualifier("help-wanted-issues", "string", "", shared.RangeValidator()),
-			"In":               shared.NewQualifier("in", "stringSlice", "name, description", shared.MultiOptsValidator([]string{"name", "description", "readme"})),
-			"Language":         shared.NewQualifier("language", "stringSlice", "", nil),
-			"License":          shared.NewQualifier("license", "stringSlice", "", nil),
-			"Mirror":           shared.NewQualifier("mirror", "bool", "", shared.BoolValidator()),
-			"Org":              shared.NewQualifier("org", "stringSlice", "", nil),
-			"Pushed":           shared.NewQualifier("pushed", "string", "", shared.DateValidator()),
-			"Repo":             shared.NewQualifier("repo", "stringSlice", "", nil),
-			"Size":             shared.NewQualifier("size", "string", "", shared.RangeValidator()),
-			"Stars":            shared.NewQualifier("stars", "string", "", shared.RangeValidator()),
-			"Topic":            shared.NewQualifier("topic", "stringSlice", "", nil),
-			"Topics":           shared.NewQualifier("topics", "string", "", shared.RangeValidator()),
-			"User":             shared.NewQualifier("user", "stringSlice", "", nil),
-			"Visibility":       shared.NewQualifier("is", "string", "all", shared.OptsValidator([]string{"public", "private"})),
-		},
-	}
 }

@@ -6,15 +6,21 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/pkg/search"
 )
 
-const maxPerPage = 100
+const (
+	maxPerPage = 100
+	orderKey   = "order"
+	sortKey    = "sort"
+)
 
 var linkRE = regexp.MustCompile(`<([^>]+)>;\s*rel="([^"]+)"`)
 var pageRE = regexp.MustCompile(`(\?|&)page=(\d*)`)
@@ -81,12 +87,12 @@ func (s *searcher) search(query search.Query, result interface{}) (*http.Respons
 	qs := url.Values{}
 	qs.Set("page", strconv.Itoa(query.Page))
 	qs.Set("per_page", strconv.Itoa(query.Limit))
-	qs.Set("q", s.QueryString(query))
-	if query.Order.IsSet() {
-		qs.Set(query.Order.Key(), query.Order.String())
+	qs.Set("q", s.String(query))
+	if query.Order != "" {
+		qs.Set(orderKey, query.Order)
 	}
-	if query.Sort.IsSet() {
-		qs.Set(query.Sort.Key(), query.Sort.String())
+	if query.Sort != "" {
+		qs.Set(sortKey, query.Sort)
 	}
 	url := fmt.Sprintf("%s?%s", path, qs.Encode())
 	req, err := http.NewRequest("GET", url, nil)
@@ -112,7 +118,7 @@ func (s *searcher) search(query search.Query, result interface{}) (*http.Respons
 	return resp, nil
 }
 
-func (s *searcher) QueryString(query search.Query) string {
+func (s *searcher) String(query search.Query) string {
 	q := strings.Builder{}
 	quotedKeywords := quoteKeywords(query.Keywords)
 	q.WriteString(strings.Join(quotedKeywords, " "))
@@ -125,16 +131,16 @@ func (s *searcher) QueryString(query search.Query) string {
 
 func (s *searcher) URL(query search.Query) string {
 	path := fmt.Sprintf("https://%s/search", s.host)
-	queryString := url.Values{}
-	queryString.Set("type", query.Kind)
-	queryString.Set("q", s.QueryString(query))
-	if query.Order.IsSet() {
-		queryString.Set(query.Order.Key(), query.Order.String())
+	qs := url.Values{}
+	qs.Set("type", query.Kind)
+	qs.Set("q", s.String(query))
+	if query.Order != "" {
+		qs.Set(orderKey, query.Order)
 	}
-	if query.Sort.IsSet() {
-		queryString.Set(query.Sort.Key(), query.Sort.String())
+	if query.Sort != "" {
+		qs.Set(sortKey, query.Sort)
 	}
-	url := fmt.Sprintf("%s?%s", path, queryString.Encode())
+	url := fmt.Sprintf("%s?%s", path, qs.Encode())
 	return url
 }
 
@@ -163,11 +169,64 @@ func quoteQualifier(q string) string {
 	return q
 }
 
+// Copied from:
+// https://github.com/asaskevich/govalidator/blob/f21760c49a8d602d863493de796926d2a5c1138d/utils.go#L107
+func camelCaseToDash(str string) string {
+	var output []rune
+	var segment []rune
+	for _, r := range str {
+		// not treat number as separate segment
+		if !unicode.IsLower(r) && string(r) != "-" && !unicode.IsNumber(r) {
+			output = addSegment(output, segment)
+			segment = nil
+		}
+		segment = append(segment, unicode.ToLower(r))
+	}
+	output = addSegment(output, segment)
+	return string(output)
+}
+
+func addSegment(inrune, segment []rune) []rune {
+	if len(segment) == 0 {
+		return inrune
+	}
+	if len(inrune) != 0 {
+		inrune = append(inrune, '-')
+	}
+	inrune = append(inrune, segment...)
+	return inrune
+}
+
 func listSet(q search.Qualifiers) map[string]string {
 	m := map[string]string{}
-	for _, v := range q {
-		if v.IsSet() {
-			m[v.Key()] = v.String()
+	v := reflect.ValueOf(q)
+	t := reflect.TypeOf(q)
+	for i := 0; i < v.NumField(); i++ {
+		fieldName := t.Field(i).Name
+		key := camelCaseToDash(fieldName)
+		typ := v.FieldByName(fieldName).Kind()
+		value := v.FieldByName(fieldName)
+		switch typ {
+		case reflect.Ptr:
+			if value.IsNil() {
+				continue
+			}
+			v := reflect.Indirect(value)
+			m[key] = fmt.Sprintf("%v", v)
+		case reflect.Slice:
+			if value.IsNil() {
+				continue
+			}
+			s := []string{}
+			for i := 0; i < value.Len(); i++ {
+				s = append(s, fmt.Sprintf("%v", value.Index(i)))
+			}
+			m[key] = strings.Join(s, ",")
+		default:
+			if value.IsZero() {
+				continue
+			}
+			m[key] = fmt.Sprintf("%v", value)
 		}
 	}
 	return m
