@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,6 +13,8 @@ import (
 	"github.com/cli/cli/v2/internal/ghinstance"
 	"github.com/cli/cli/v2/pkg/search"
 )
+
+const maxPerPage = 100
 
 var linkRE = regexp.MustCompile(`<([^>]+)>;\s*rel="([^"]+)"`)
 var pageRE = regexp.MustCompile(`(\?|&)page=(\d*)`)
@@ -37,7 +38,7 @@ func (s *searcher) Repositories(query search.Query) (search.RepositoriesResult, 
 	var resp *http.Response
 	var err error
 	for toRetrieve > 0 {
-		query.Limit = int(math.Min(float64(toRetrieve), float64(100)))
+		query.Limit = min(toRetrieve, maxPerPage)
 		query.Page = nextPage(resp)
 		if query.Page == 0 {
 			break
@@ -211,4 +212,11 @@ func handleHTTPError(resp *http.Response) error {
 		return err
 	}
 	return httpError
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
